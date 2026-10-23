@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Wrap Cursor CLI `agent` so each run reuses the Desktop app's current login.
+# Scheme A: sync state.vscdb → ~/.cursor/auth.json, then exec real agent.
+set -euo pipefail
+
+SYNC="${HOME}/.local/bin/cursor-agent-sync-auth"
+VERSIONS_DIR="${HOME}/.local/share/cursor-agent/versions"
+
+resolve_real_agent() {
+  if [[ -n "${CURSOR_AGENT_BIN:-}" && -x "${CURSOR_AGENT_BIN}" ]]; then
+    printf '%s\n' "${CURSOR_AGENT_BIN}"
+    return 0
+  fi
+
+  # Prefer newest installed version directory.
+  local latest=""
+  if [[ -d "${VERSIONS_DIR}" ]]; then
+    latest="$(ls -1dt "${VERSIONS_DIR}"/*/cursor-agent 2>/dev/null | head -1 || true)"
+  fi
+  if [[ -n "${latest}" && -x "${latest}" ]]; then
+    printf '%s\n' "${latest}"
+    return 0
+  fi
+
+  # Fallback: sibling name used before this wrapper replaced the symlink.
+  if [[ -x "${HOME}/.local/bin/agent.real" ]]; then
+    printf '%s\n' "${HOME}/.local/bin/agent.real"
+    return 0
+  fi
+
+  echo "agent-desktop-auth-wrapper: could not find cursor-agent binary" >&2
+  return 1
+}
+
+# Skip sync only when explicitly disabled.
+if [[ "${CURSOR_AGENT_SKIP_DESKTOP_SYNC:-0}" != "1" ]]; then
+  if [[ -x "${SYNC}" ]]; then
+    # Fail soft: still try agent if Desktop is logged out / DB locked.
+    if ! "${SYNC}" --quiet; then
+      echo "agent-desktop-auth-wrapper: Desktop sync failed; continuing with existing CLI auth" >&2
+    fi
+  fi
+fi
+
+export AGENT_CLI_CREDENTIAL_STORE=file
+
+REAL_AGENT="$(resolve_real_agent)"
+exec "${REAL_AGENT}" "$@"

@@ -1,0 +1,25 @@
+# Secrets and machine-local auth — never commit
+**/.env
+**/.env.*
+**/auth.json
+**/logins.json
+**/plugin-auth.json
+**/*token*
+**/*secret*
+**/credentials*
+*.pem
+*.key
+
+# Local Codex / Magpie dumps
+templates/**/*.local.toml
+templates/**/*.local.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Cache / logs from install
+.cache/
+*.log

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Debounced Desktop → CLI auth sync for launchd WatchPaths.
+# Only follows the Desktop login; does not rotate accounts.
+set -euo pipefail
+
+SYNC="${HOME}/.local/bin/cursor-agent-sync-auth"
+STAMP_DIR="${HOME}/.cache/cursor-agent-desktop-sync"
+STAMP="${STAMP_DIR}/last-run"
+LOCK="${STAMP_DIR}/lock"
+LOG="${STAMP_DIR}/watch.log"
+DEBOUNCE_SEC="${CURSOR_AGENT_SYNC_DEBOUNCE_SEC:-3}"
+
+mkdir -p "${STAMP_DIR}"
+chmod 700 "${STAMP_DIR}" 2>/dev/null || true
+
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"${LOG}"
+}
+
+# Drop overlapping WatchPaths storms.
+if ! mkdir "${LOCK}" 2>/dev/null; then
+  exit 0
+fi
+trap 'rmdir "${LOCK}" 2>/dev/null || true' EXIT
+
+now="$(date +%s)"
+if [[ -f "${STAMP}" ]]; then
+  last="$(cat "${STAMP}" 2>/dev/null || echo 0)"
+  if [[ "${last}" =~ ^[0-9]+$ ]] && (( now - last < DEBOUNCE_SEC )); then
+    exit 0
+  fi
+fi
+echo "${now}" >"${STAMP}"
+
+if [[ ! -x "${SYNC}" ]]; then
+  log "missing sync binary: ${SYNC}"
+  exit 0
+fi
+
+# Always succeed for launchd; keep a short trail even on quiet success.
+if out="$("${SYNC}" --quiet 2>&1)"; then
+  log "ok${out:+: ${out}}"
+else
+  log "sync failed (non-fatal): ${out:-unknown}"
+fi
+
+exit 0

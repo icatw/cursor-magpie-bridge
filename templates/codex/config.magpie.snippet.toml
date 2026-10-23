@@ -1,0 +1,15 @@
+# Paste into ~/.codex/config.toml (or merge carefully).
+# Do NOT commit real bearer tokens. Generate/replace on each machine.
+
+model = "cursor/auto"
+openai_base_url = "http://127.0.0.1:3425/backend-api/codex"
+
+[model_providers.magpie]
+name = "magpie"
+base_url = "http://127.0.0.1:3425/v1"
+wire_api = "responses"
+experimental_bearer_token = "magpie"
+http_headers = { "x-openai-actor-authorization" = "magpie" }
+
+# Optional: if Magpie gave you a separate custom provider key, configure it
+# in Magpie UI / ~/.config/magpie and keep secrets out of git.

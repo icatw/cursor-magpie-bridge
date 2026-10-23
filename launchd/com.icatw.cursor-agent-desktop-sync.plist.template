@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.icatw.cursor-agent-desktop-sync</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__HOME__/.local/bin/cursor-agent-desktop-sync-watch</string>
+	</array>
+	<key>WatchPaths</key>
+	<array>
+		<string>__HOME__/Library/Application Support/Cursor/User/globalStorage/state.vscdb</string>
+		<string>__HOME__/Library/Application Support/Cursor/User/globalStorage/state.vscdb-wal</string>
+	</array>
+	<!-- Backup poll in case WatchPaths misses a WAL-only update. -->
+	<key>StartInterval</key>
+	<integer>120</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardOutPath</key>
+	<string>__HOME__/.cache/cursor-agent-desktop-sync/launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/.cache/cursor-agent-desktop-sync/launchd.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# After Desktop/续杯 switches accounts: sync CLI auth, then re-enter the
+# latest (or given) chat in a NEW process. Does not call any account pool.
+#
+# Usage:
+#   agent-desktop-reenter [--wait-sec N] [--resume CHAT_ID] [--] [agent args...]
+# Defaults: sync now, then `agent --continue` plus remaining args (e.g. --yolo).
+set -euo pipefail
+
+SYNC="${HOME}/.local/bin/cursor-agent-sync-auth"
+AGENT_BIN="${HOME}/.local/bin/agent"
+WAIT_SEC="${CURSOR_AGENT_WAIT_SWITCH_SEC:-0}"
+RESUME_ID=""
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --wait-sec)
+      WAIT_SEC="${2:?}"
+      shift 2
+      ;;
+    --resume)
+      RESUME_ID="${2:?}"
+      shift 2
+      ;;
+    --)
+      shift
+      ARGS+=("$@")
+      break
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+fp_now() {
+  python3 - <<'PY'
+import hashlib, json, sqlite3
+from pathlib import Path
+
+def decode(raw):
+    if raw is None: return None
+    raw = str(raw).strip()
+    if not raw: return None
+    try:
+        p = json.loads(raw)
+        if isinstance(p, str): return p.strip() or None
+    except Exception:
+        pass
+    return raw
+
+db = Path.home() / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+if not db.is_file():
+    print("")
+    raise SystemExit(0)
+conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
+row = conn.execute(
+    "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken'"
+).fetchone()
+conn.close()
+tok = decode(row[0] if row else None)
+print(hashlib.sha256(tok.encode()).hexdigest()[:16] if tok else "")
+PY
+}
+
+if [[ ! -x "${SYNC}" ]]; then
+  echo "agent-desktop-reenter: missing ${SYNC}" >&2
+  exit 1
+fi
+if [[ ! -x "${AGENT_BIN}" ]]; then
+  echo "agent-desktop-reenter: missing ${AGENT_BIN}" >&2
+  exit 1
+fi
+
+baseline="$(fp_now)"
+if (( WAIT_SEC > 0 )); then
+  echo "agent-desktop-reenter: waiting up to ${WAIT_SEC}s for Desktop token change (baseline ${baseline:-none})…" >&2
+  deadline=$((SECONDS + WAIT_SEC))
+  while (( SECONDS < deadline )); do
+    "${SYNC}" --quiet || true
+    cur="$(fp_now)"
+    if [[ -n "${cur}" && "${cur}" != "${baseline}" ]]; then
+      echo "agent-desktop-reenter: Desktop switched (${baseline} → ${cur})" >&2
+      break
+    fi
+    sleep 2
+  done
+fi
+
+"${SYNC}" || true
+export AGENT_CLI_CREDENTIAL_STORE=file
+
+if [[ -n "${RESUME_ID}" ]]; then
+  echo "agent-desktop-reenter: exec agent --resume ${RESUME_ID} …" >&2
+  exec "${AGENT_BIN}" --resume "${RESUME_ID}" "${ARGS[@]}"
+fi
+
+echo "agent-desktop-reenter: exec agent --continue …" >&2
+exec "${AGENT_BIN}" --continue "${ARGS[@]}"

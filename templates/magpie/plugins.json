@@ -1,0 +1,7 @@
+{
+  "plugins": [
+    {
+      "spec": "@magpie-community/opencode-cursor-auth@latest"
+    }
+  ]
+}

@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Sync Cursor Desktop login into CLI auth.json and macOS keychain.
+
+Reads access/refresh tokens from the IDE globalStorage SQLite DB and writes:
+  1. ~/.cursor/auth.json  (CLI with AGENT_CLI_CREDENTIAL_STORE=file)
+  2. Keychain item cursor-access-token / cursor-user  (Magpie prefers this on macOS)
+
+Never prints token values.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import platform
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+IDE_DB = (
+    Path.home()
+    / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+)
+AUTH_JSON = Path.home() / ".cursor" / "auth.json"
+
+KEYCHAIN_SERVICE = "cursor-access-token"
+KEYCHAIN_ACCOUNT = "cursor-user"
+
+KEYS = (
+    "cursorAuth/accessToken",
+    "cursorAuth/refreshToken",
+    "cursorAuth/cachedEmail",
+)
+
+
+def _decode_value(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, str):
+            return parsed.strip() or None
+    except json.JSONDecodeError:
+        pass
+    return raw
+
+
+def _read_ide_auth(db_path: Path) -> dict[str, str | None]:
+    if not db_path.is_file():
+        raise FileNotFoundError(f"Desktop auth DB not found: {db_path}")
+
+    uri = db_path.resolve().as_uri() + "?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.OperationalError:
+        # IDE may hold a WAL lock; immutable snapshot avoids blocking.
+        conn = sqlite3.connect(db_path.resolve().as_uri() + "?immutable=1", uri=True)
+
+    try:
+        placeholders = ",".join("?" * len(KEYS))
+        rows = conn.execute(
+            f"SELECT key, value FROM ItemTable WHERE key IN ({placeholders})",
+            KEYS,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    raw = {k: v for k, v in rows}
+    return {k: _decode_value(raw.get(k)) for k in KEYS}
+
+
+def _write_auth_json(path: Path, access: str, refresh: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = {"accessToken": access, "refreshToken": refresh}
+    data = json.dumps(payload, indent=2) + "\n"
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".auth.",
+        suffix=".json.tmp",
+        dir=str(path.parent),
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        tmp.replace(path)
+        os.chmod(path, 0o600)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _auth_json_matches(path: Path, access: str, refresh: str) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        existing = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        existing.get("accessToken") == access
+        and existing.get("refreshToken") == refresh
+    )
+
+
+def _keychain_supported() -> bool:
+    return platform.system() == "Darwin"
+
+
+def _read_keychain_access() -> str | None:
+    """Return current keychain access token, or None if missing/unreadable."""
+    if not _keychain_supported():
+        return None
+    try:
+        r = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    tok = (r.stdout or "").strip()
+    return tok or None
+
+
+def _write_keychain_access(access: str) -> None:
+    """Create or update Magpie/cursor-agent's preferred keychain token."""
+    if not _keychain_supported():
+        return
+    # -U updates an existing item; still may prompt once for keychain access.
+    r = subprocess.run(
+        [
+            "security",
+            "add-generic-password",
+            "-U",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            KEYCHAIN_ACCOUNT,
+            "-w",
+            access,
+            "-l",
+            "Cursor Access Token",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if r.returncode == 0:
+        return
+    err = (r.stderr or r.stdout or "").strip() or f"exit {r.returncode}"
+    raise OSError(f"keychain update failed: {err}")
+
+
+def _keychain_matches(access: str) -> bool:
+    if not _keychain_supported():
+        return True  # nothing to do off macOS
+    current = _read_keychain_access()
+    return current == access
+
+
+def sync(*, quiet: bool = False) -> int:
+    try:
+        auth = _read_ide_auth(IDE_DB)
+    except FileNotFoundError as e:
+        print(f"cursor-agent-sync-auth: {e}", file=sys.stderr)
+        return 1
+    except sqlite3.Error as e:
+        print(f"cursor-agent-sync-auth: failed to read IDE DB: {e}", file=sys.stderr)
+        return 1
+
+    access = auth.get("cursorAuth/accessToken")
+    refresh = auth.get("cursorAuth/refreshToken")
+    email = auth.get("cursorAuth/cachedEmail") or "(unknown)"
+
+    if not access or not refresh:
+        print(
+            "cursor-agent-sync-auth: Desktop is not logged in "
+            "(missing accessToken/refreshToken).",
+            file=sys.stderr,
+        )
+        return 1
+
+    json_ok = _auth_json_matches(AUTH_JSON, access, refresh)
+    key_ok = _keychain_matches(access)
+
+    if json_ok and key_ok:
+        if not quiet:
+            print(f"cursor-agent-sync-auth: already synced as {email}")
+        return 0
+
+    wrote: list[str] = []
+
+    if not json_ok:
+        try:
+            _write_auth_json(AUTH_JSON, access, refresh)
+            wrote.append("auth.json")
+        except OSError as e:
+            print(
+                f"cursor-agent-sync-auth: failed to write {AUTH_JSON}: {e}",
+                file=sys.stderr,
+            )
+            return 1
+
+    if not key_ok:
+        try:
+            _write_keychain_access(access)
+            wrote.append("keychain")
+        except OSError as e:
+            print(f"cursor-agent-sync-auth: {e}", file=sys.stderr)
+            # auth.json may already be updated; still fail so launchd retries
+            return 1
+
+    if not quiet:
+        targets = "+".join(wrote) if wrote else "noop"
+        print(
+            f"cursor-agent-sync-auth: synced Desktop → {targets} as {email}"
+        )
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    quiet = "--quiet" in argv or "-q" in argv
+    if "--help" in argv or "-h" in argv:
+        print(
+            "Usage: cursor-agent-sync-auth [--quiet]\n"
+            "Copy Cursor Desktop tokens into:\n"
+            "  ~/.cursor/auth.json\n"
+            "  Keychain (cursor-access-token / cursor-user) for Magpie\n"
+            "Set AGENT_CLI_CREDENTIAL_STORE=file when running agent."
+        )
+        return 0
+    return sync(quiet=quiet)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
